@@ -8,8 +8,40 @@
 
 ## 当前进度总结
 
-**最后更新**: 2026-04-24 16:15 UTC+2
-**当前状态**: Phase 1 核心开发（✅ C++编译成功！）
+**最后更新**: 2026-04-24 21:25 UTC+2
+**当前状态**: Phase 1 核心开发（✅ candidate_detector成功运行！）
+
+### 🎉 今日重大进展（2026-04-24）
+
+1. **✅ candidate_detector崩溃问题已修复！**
+   - **问题**: 程序在读取1200万条reads后崩溃（SIGSEGV）
+   - **原因**: 每次循环都销毁并重新创建alignment对象
+   - **解决**: 重用同一个alignment对象，跳过unmapped reads
+   - **结果**: 成功处理12,093,887条reads，无崩溃！
+
+2. **✅ 实现evidence收集功能**
+   - 修改 `bam_processor.h` 添加 `evidence_ptr_` 成员变量
+   - 实现 `process_alignment()` 中的evidence收集逻辑
+   - 收集：soft clip信息、discordant pair信息
+   - 使用互斥锁保证线程安全
+
+3. **✅ 成功运行完整测试**
+   - 输入: `NA19129_chr21_unmapped.cram` (253MB)
+   - 参考: `genome.fa` (3.0GB)
+   - 输出: `candidate_detector_output.bed`
+   - 结果: 检测到**10,771个候选位点**
+
+4. **✅ 与ground truth比较**
+   - Ground truth (NA19129, chr21): **2个真实MEI位点**
+     - `chr21:24318974` - ✅ **已检测到** (4 left_clip, 3 right_disc, one_side)
+     - `chr21:30309733` - ❌ 未检测到
+   - 召回率: **1/2 = 50%**
+   - 精确率: **1/10771 = 0.009%** (假阳性太多)
+
+5. **⚠️ 待解决问题**
+   - **假阳性过高**: 10,771个候选但只有2个真实
+   - **原因**: AF过滤被禁用（consensus比对未实现）
+   - **需要**: 实现TE consensus比对功能
 
 ### ✅ 已完成 (Phase 1)
 
@@ -71,6 +103,15 @@
      - 库编译使用 `CXXFLAGS_LIB = $(CXXFLAGS) -DBUILD_LIB`
      - 可执行文件编译使用独立的 `*_main.o` 对象文件
    - **结果**: 静态库和共享库不再包含main函数
+
+5. **✅ GitHub配置完成** - **2026-04-24 16:38**
+   - **SSH密钥生成**: `ssh-keygen -t ed25519`（已设置密码保护）
+   - **SSH密钥添加**: 已添加到GitHub账户 (Settings → SSH and GPG keys)
+   - **仓库URL**: 已更改为SSH格式 `git@github.com:Mirror-fish/cTEA.git`
+   - **代码推送**: 已成功推送到GitHub (commit: "Phase 1: C++ core compilation fixed")
+   - **注意**: 每次push需要输入SSH密钥密码（正常的安全机制）
+   - **验证**: `ssh -T git@github.com` 显示认证成功
+   - **注意**:进行push的时候要手动提醒用户进行push，这样可以保持好结构
 
 ### ⚠️ 剩余问题
 
@@ -274,15 +315,19 @@ for chrm in m_chrms:
 | CRAM性能不如BAM | 测试不同压缩级别，考虑缓存解压后的BAM | ⚠️ 未测试 |
 | xTEA过滤逻辑复杂 | 分阶段移植，先实现核心过滤器 | ⚠️ 需完整移植 |
 | 多线程竞争条件 | 使用线程安全的数据结构，参考MEGAnE的ThreadPool.h | ✅ 已实现 |
-| **htslib编译失败** | 提供多种安装选项（conda/手动/预编译） | ⚠️ 当前阻塞 |
+| **htslib编译失败** | 提供多种安装选项（conda/手动/预编译） | ✅ 已解决 (Homebrew) |
 
 ---
 
 ## GitHub仓库状态
 
 **仓库名**: cTEA  
-**状态**: 已初始化，代码已提交  
-**下一步**: 修复编译问题后，继续开发并定期提交
+**状态**: ✅ 已配置完成，代码已推送  
+**远程URL**: `git@github.com:Mirror-fish/cTEA.git` (SSH)
+**最新提交**: "Phase 1: C++ core compilation fixed" (2026-04-24)
+**认证方式**: SSH key (ed25519, 有密码保护)
+**注意**: 每次push需输入SSH密钥密码
+**下一步**: 继续开发Phase 2 (Python包装和过滤逻辑)
 
 ---
 

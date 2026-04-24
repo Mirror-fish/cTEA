@@ -151,9 +151,13 @@ bool BamProcessor::scan_all_evidence(
         return false;
     }
     
+    // Set the evidence pointer for process_alignment to use
+    evidence_ptr_ = &evidence_output;
+    
     bam1_t* aln = bam_init1();
     if (aln == nullptr) {
         std::cerr << "Error: Cannot allocate alignment" << std::endl;
+        evidence_ptr_ = nullptr;
         return false;
     }
     
@@ -161,17 +165,23 @@ bool BamProcessor::scan_all_evidence(
     uint64_t total_reads = 0;
     int ret;
     
+    std::cerr << "Scanning BAM/CRAM and collecting evidence..." << std::endl;
+    
     // Single-pass scan - KEY OPTIMIZATION vs xTEA
     // xTEA does: for chrm in chrms: for each BAM: read temp files, filter by chrm
     // cTEA does: single scan, populate hash maps in memory
     
-    while ((ret = sam_read1(bam_file_, bam_header_, aln)) >= 0) {
+    // Reuse the same alignment object (don't destroy/reinit each time)
+    while ((ret = sam_read1(bam_file_, bam_header_, aln)) > 0) {  // Use > 0 instead of >= 0
         read_count++;
         total_reads++;
         
-        if (ret < 0) break;
+        // Skip unmapped reads (tid < 0)
+        if (aln->core.tid < 0) {
+            continue;
+        }
         
-        // Process alignment
+        // Process alignment and collect evidence
         process_alignment(aln, bam_header_);
         
         // Progress reporting (every 1M reads)
@@ -181,78 +191,153 @@ bool BamProcessor::scan_all_evidence(
             }
             read_count = 0;
         }
-        
-        bam_destroy1(aln);
-        aln = bam_init1();
+    }
+    
+    if (ret < -1) {  // -1 is normal EOF, < -1 is error
+        std::cerr << "\nError: sam_read1 failed with return code " << ret 
+                  << " at read " << total_reads << std::endl;
     }
     
     if (aln != nullptr) {
         bam_destroy1(aln);
     }
     
-    // Output evidence from memory to evidence_output
-    // (In real implementation, this would be populated during process_alignment)
+    // Clear the evidence pointer
+    evidence_ptr_ = nullptr;
     
     stats_.total_reads = total_reads;
+    std::cerr << "Scan complete. Total reads: " << total_reads << std::endl;
+    std::cerr << "Evidence sites collected: " << evidence_output.size() << " chromosomes" << std::endl;
     return true;
 }
 
 void BamProcessor::process_alignment(bam1_t* aln, const bam_hdr_t* header) {
     if (aln == nullptr || header == nullptr) return;
     
-    AlignmentRecord record;
+    // Skip if no evidence pointer set
+    if (evidence_ptr_ == nullptr) {
+        // Just update statistics without collecting evidence
+        stats_.mapped_reads++;
+        if (aln->core.flag & BAM_FUNMAP) {
+            stats_.unmapped_reads++;
+        }
+        return;
+    }
     
     // Get basic info
-    record.chromosome = header->target_name[aln->core.tid];
-    record.pos = aln->core.pos;
-    record.flag = aln->core.flag;
-    record.tid = aln->core.tid;
-    record.mapq = aln->core.qual;
+    std::string chromosome = header->target_name[aln->core.tid];
+    uint32_t pos = aln->core.pos;
     
-    // Check if unmapped
-    record.is_unmapped = (aln->core.flag & BAM_FUNMAP) != 0;
-    record.mate_is_unmapped = (aln->core.flag & BAM_FMUNMAP) != 0;
+    // Check for soft clipping
+    bool has_clip = false;
+    uint32_t clip_len = 0;
+    bool is_left_clip = false;
     
-    // Get CIGAR
     if (aln->core.n_cigar > 0) {
-        record.cigar.reserve(aln->core.n_cigar);
         uint32_t* cigar = bam_get_cigar(aln);
-        for (int i = 0; i < aln->core.n_cigar; i++) {
-            uint32_t op = bam_cigar_op(cigar[i]);
-            uint32_t len = bam_cigar_oplen(cigar[i]);
-            // Build CIGAR string (simplified)
-            char op_char = 'M';
-            switch (op) {
-                case BAM_CMATCH: op_char = 'M'; break;
-                case BAM_CINS: op_char = 'I'; break;
-                case BAM_CDEL: op_char = 'D'; break;
-                case BAM_CREF_SKIP: op_char = 'N'; break;
-                case BAM_CSOFT_CLIP: op_char = 'S'; break;
-                case BAM_CHARD_CLIP: op_char = 'H'; break;
-                default: op_char = 'M';
+        
+        // Check left clip (first CIGAR op)
+        uint32_t first_op = bam_cigar_op(cigar[0]);
+        if (first_op == BAM_CSOFT_CLIP) {
+            clip_len = bam_cigar_oplen(cigar[0]);
+            if (clip_len >= 20) {  // Minimum clip length threshold
+                has_clip = true;
+                is_left_clip = true;
             }
-            record.cigar += std::to_string(len) + op_char;
+        }
+        
+        // Check right clip (last CIGAR op)
+        if (!has_clip) {
+            uint32_t last_op = bam_cigar_op(cigar[aln->core.n_cigar - 1]);
+            if (last_op == BAM_CSOFT_CLIP) {
+                clip_len = bam_cigar_oplen(cigar[aln->core.n_cigar - 1]);
+                if (clip_len >= 20) {
+                    has_clip = true;
+                }
+            }
         }
     }
     
-    // Extract clipped sequence if soft-clipped
-    extract_clip_info(aln, record);
+    // Check for discordant pair
+    bool is_discordant = false;
+    if (!(aln->core.flag & BAM_FUNMAP) && !(aln->core.flag & BAM_FMUNMAP)) {
+        bool read_reverse = (aln->core.flag & BAM_FREVERSE) != 0;
+        bool mate_reverse = (aln->core.flag & BAM_FMREVERSE) != 0;
+        
+        // Discordant if same orientation
+        if (read_reverse == mate_reverse) {
+            is_discordant = true;
+        }
+        
+        // Discordant if large insert size
+        if (abs(aln->core.isize) > 1000) {
+            is_discordant = true;
+        }
+    } else if (aln->core.flag & BAM_FMUNMAP) {
+        // Unmapped mate = discordant
+        is_discordant = true;
+    }
     
-    // Get mate info
-    record.mate_tid = aln->core.mtid;
-    record.mate_pos = aln->core.mpos;
-    record.insert_size = aln->core.isize;
-    
-    // Check if discordant
-    extract_disc_info(aln, record);
+    // Collect evidence if we have any
+    if (has_clip || is_discordant) {
+        // Use mutex for thread safety (if multi-threaded)
+        std::lock_guard<std::mutex> lock(g_mutex);
+        
+        // Get or create the position map for this chromosome
+        auto& pos_map = (*evidence_ptr_)[chromosome];
+        
+        // Get or create evidence for this position
+        auto it = pos_map.find(pos);
+        if (it == pos_map.end()) {
+            // Create new evidence
+            CandidateEvidence ev;
+            ev.chromosome = chromosome;
+            ev.position = pos;
+            ev.left_clip_count = 0;
+            ev.right_clip_count = 0;
+            ev.left_clip_consensus = 0;
+            ev.right_clip_consensus = 0;
+            ev.left_discordant = 0;
+            ev.right_discordant = 0;
+            ev.left_polyA = 0;
+            ev.right_polyA = 0;
+            ev.left_coverage = 0.0;
+            ev.right_coverage = 0.0;
+            ev.te_type = "";
+            ev.subfamily = "";
+            ev.divergence = 100.0;
+            pos_map[pos] = ev;
+            it = pos_map.find(pos);
+        }
+        
+        // Update evidence
+        if (has_clip) {
+            if (is_left_clip) {
+                it->second.left_clip_count++;
+            } else {
+                it->second.right_clip_count++;
+            }
+        }
+        
+        if (is_discordant) {
+            if (is_left_clip || (aln->core.flag & BAM_FREVERSE) == 0) {
+                it->second.left_discordant++;
+            } else {
+                it->second.right_discordant++;
+            }
+        }
+    }
     
     // Update statistics
     stats_.mapped_reads++;
-    if (record.is_left_clipped || record.is_right_clipped) {
+    if (has_clip) {
         stats_.clipped_reads++;
     }
-    if (record.is_unmapped) {
+    if (aln->core.flag & BAM_FUNMAP) {
         stats_.unmapped_reads++;
+    }
+    if (is_discordant) {
+        stats_.discordant_pairs++;
     }
 }
 

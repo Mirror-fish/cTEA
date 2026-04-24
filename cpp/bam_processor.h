@@ -211,6 +211,10 @@ private:
     // Reference sequence cache (avoid repeated loading)
     std::unordered_map<std::string, std::string> ref_cache_;
     
+    // Evidence collection pointer (set by scan_all_evidence)
+    std::unordered_map<std::string, 
+                      std::unordered_map<uint32_t, CandidateEvidence>>* evidence_ptr_;
+    
     // Private methods
     bool open_bam_file();
     void close_bam_file();

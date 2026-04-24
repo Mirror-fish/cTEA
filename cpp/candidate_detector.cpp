@@ -284,8 +284,11 @@ public:
             }
             
             // Filter 2: AF cutoff (from xTEA's AF conflict check)
+            // DISABLED: consensus calculation not yet implemented
+            // Will be re-enabled when consensus alignment is added
+            /*
             uint32_t total_effective = site.left_clip_count + site.right_clip_count +
-                                        site.left_discordant + site.right_discordant;
+                                         site.left_discordant + site.right_discordant;
             if (total_effective > 0) {
                 float af = (float)(site.left_clip_consensus + site.right_clip_consensus) / total_effective;
                 if (af < min_af_cutoff_) {
@@ -293,6 +296,7 @@ public:
                     continue;
                 }
             }
+            */
             
             // Filter 3: Cluster consistency (for two_side only)
             if (site.support_type == "two_side") {

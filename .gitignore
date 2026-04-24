@@ -1,0 +1,39 @@
+# Compilation outputs
+cpp/*.o
+cpp/*.a
+cpp/*.so
+cpp/candidate_detector
+cpp/extract_reads
+cpp/kmer_filter
+cpp/*_main.o
+cpp/*_debug.o
+
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Test data (large files)
+tests/testdata/
+tests/intermediate_files/
+
+# Temporary files
+*.tmp
+*.log
+*.out
+*.err
+
+# Build directories
+build/
+dist/
