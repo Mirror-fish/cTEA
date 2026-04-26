@@ -23,12 +23,18 @@ LIBS = -L$(HTSLIB_DIR) -lhts -lz -lbz2 -llzma -lpthread
 # For building shared/static library, define BUILD_LIB to exclude main functions
 CXXFLAGS_LIB = $(CXXFLAGS) -DBUILD_LIB
 
+# pybind11 configuration (use virtual environment's python)
+PYBIND11_INC = $(shell /Users/jzeng/Desktop/cTEA/venv/bin/python3 -c "import pybind11; print(pybind11.get_include())" 2>/dev/null || echo "")
+PYTHON_INC = /opt/homebrew/opt/python@3.14/Frameworks/Python.framework/Versions/3.14/include/python3.14
+PYBIND11_CFLAGS = $(if $(PYBIND11_INC),-I$(PYBIND11_INC) -I$(PYTHON_INC),)
+
 # Source files
 SRCS = bam_processor.cpp extract_reads.cpp kmer_filter.cpp candidate_detector.cpp
 OBJS = $(SRCS:.cpp=.o)
+BINDINGS_OBJ = bindings.o
 
 # Targets
-ALL = libcTEA.a libcTEA.so extract_reads kmer_filter candidate_detector
+ALL = libcTEA.a libcTEA.so libcTEA_pybind11.so extract_reads kmer_filter candidate_detector
 
 all: $(ALL)
 
@@ -36,9 +42,19 @@ all: $(ALL)
 libcTEA.a: $(OBJS)
 	ar rcs $@ $^
 
-# Shared library (for Python ctypes/pybind11)
+# Shared library (for Python ctypes)
 libcTEA.so: $(OBJS)
 	$(CXX) -shared -o $@ $^ $(LIBS)
+
+# pybind11 module (for direct Python import)
+PYTHON_FRAMEWORK_PATH = /opt/homebrew/opt/python@3.14/Frameworks
+
+libcTEA_pybind11.so: $(BINDINGS_OBJ) $(OBJS)
+	$(CXX) -shared -o $@ $^ $(LIBS) -L$(HTSLIB_DIR) -lhts -lz -lbz2 -llzma -lpthread -F$(PYTHON_FRAMEWORK_PATH) -framework Python
+
+# Object file for pybind11 bindings
+bindings.o: bindings.cpp bam_processor.h candidate_detector.h
+	$(CXX) $(CXXFLAGS) $(PYBIND11_CFLAGS) $(INCLUDES) -c $< -o $@
 
 # Individual executables (for testing) - without BUILD_LIB
 extract_reads: extract_reads_main.o bam_processor_main.o
@@ -78,7 +94,7 @@ candidate_detector_main.o: candidate_detector.cpp bam_processor.h
 
 # Clean
 clean:
-	rm -f $(OBJS) *_main.o $(ALL)
+	rm -f $(OBJS) $(BINDINGS_OBJ) *_main.o $(ALL) libcTEA_pybind11.so
 
 # Install (optional)
 install: libcTEA.so
