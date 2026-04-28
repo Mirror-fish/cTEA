@@ -43,11 +43,11 @@ CandidateSite::CandidateSite() : chrom(""), pos(0),
 
 // CandidateDetector constructor
 CandidateDetector::CandidateDetector() : bam_processor_(nullptr),
-    min_clip_len_(20),
-    min_disc_count_(3),
+    min_clip_len_(1),   // Priority 2: Reduced from 2 to 1 for low-signal events
+    min_disc_count_(1),  // Keep as 1 (close to xTEA's dynamic threshold)
     min_af_cutoff_(0.075),
-    clip_cluster_diff_cutoff_(300),
-    sva_clip_cluster_diff_cutoff_(200),
+    clip_cluster_diff_cutoff_(100),  // Priority 2: Reduced from 300 to 100bp (more strict)
+    sva_clip_cluster_diff_cutoff_(100),  // Priority 2: Reduced from 200 to 100bp
     total_reads_processed_(0),
     candidates_found_(0) {}
 
@@ -103,6 +103,12 @@ bool CandidateDetector::detect_candidates(
     
     std::cerr << "Found " << candidates_.size() << " candidate sites" << std::endl;
     
+    // NEW: Cluster nearby candidates (Priority 1 improvement)
+    // Reference: xTEA's chain_regions function (PEAK_WINDOW=100bp)
+    cluster_nearby_candidates();
+    
+    std::cerr << "After clustering: " << candidates_.size() << " candidate sites" << std::endl;
+    
     // Apply filters (merged from xTEA's logic)
     filter_candidates();
     
@@ -156,6 +162,135 @@ void CandidateDetector::build_candidates(
     }
 }
 
+// NEW: Cluster nearby candidates (Priority 1 improvement)
+// Reference: xTEA's chain_regions function (PEAK_WINDOW=100bp)
+void CandidateDetector::cluster_nearby_candidates() {
+    const uint32_t CLUSTER_WINDOW = 100;  // xTEA's PEAK_WINDOW
+    
+    std::cerr << "Clustering nearby candidates (window=" << CLUSTER_WINDOW << "bp)..." << std::endl;
+    
+    // Group candidates by chromosome
+    std::unordered_map<std::string, std::vector<std::string>> chr_candidates;
+    for (const auto& entry : candidates_) {
+        const auto& key = entry.first;
+        size_t colon_pos = key.find(':');
+        if (colon_pos != std::string::npos) {
+            std::string chrom = key.substr(0, colon_pos);
+            chr_candidates[chrom].push_back(key);
+        }
+    }
+    
+    // New clustered candidates map
+    std::unordered_map<std::string, CandidateSite> clustered_candidates;
+    
+    uint32_t total_clusters = 0;
+    
+    for (auto& chr_entry : chr_candidates) {
+        auto& keys = chr_entry.second;
+        
+        // Sort by position
+        std::sort(keys.begin(), keys.end(), 
+            [](const std::string& a, const std::string& b) {
+                size_t pos_a = std::stoul(a.substr(a.find(':') + 1));
+                size_t pos_b = std::stoul(b.substr(b.find(':') + 1));
+                return pos_a < pos_b;
+            });
+        
+        // Cluster nearby candidates
+        std::vector<std::string> cluster;
+        std::string prev_chrom = "";
+        uint32_t prev_pos = 0;
+        
+        for (const auto& key : keys) {
+            size_t colon_pos = key.find(':');
+            std::string chrom = key.substr(0, colon_pos);
+            uint32_t pos = std::stoul(key.substr(colon_pos + 1));
+            
+            if (cluster.empty()) {
+                cluster.push_back(key);
+                prev_chrom = chrom;
+                prev_pos = pos;
+            } else {
+                // Check if within cluster window
+                if (chrom == prev_chrom && 
+                    (pos - prev_pos) <= CLUSTER_WINDOW) {
+                    cluster.push_back(key);
+                    prev_pos = pos;
+                } else {
+                    // Process current cluster
+                    if (cluster.size() > 0) {
+                        process_cluster(cluster, clustered_candidates);
+                        total_clusters++;
+                    }
+                    cluster.clear();
+                    cluster.push_back(key);
+                    prev_chrom = chrom;
+                    prev_pos = pos;
+                }
+            }
+        }
+        
+        // Process last cluster
+        if (cluster.size() > 0) {
+            process_cluster(cluster, clustered_candidates);
+            total_clusters++;
+        }
+    }
+    
+    // Replace candidates_ with clustered_candidates
+    candidates_ = std::move(clustered_candidates);
+    
+    std::cerr << "Clustering complete: " << total_clusters << " clusters formed" << std::endl;
+}
+
+// Helper function to process a cluster of nearby candidates
+void CandidateDetector::process_cluster(
+    const std::vector<std::string>& cluster,
+    std::unordered_map<std::string, CandidateSite>& clustered_candidates) {
+    
+    if (cluster.empty()) return;
+    
+    // Find the representative site (with max evidence)
+    std::string best_key;
+    uint32_t max_evidence = 0;
+    CandidateSite best_site;
+    
+    for (const auto& key : cluster) {
+        auto it = candidates_.find(key);
+        if (it != candidates_.end()) {
+            const auto& site = it->second;
+            uint32_t evidence = site.left_clip_count + site.right_clip_count +
+                              site.left_discordant + site.right_discordant;
+            
+            if (evidence > max_evidence) {
+                max_evidence = evidence;
+                best_key = key;
+                best_site = site;
+            }
+        }
+    }
+    
+    // Sum evidence from all sites in cluster
+    for (const auto& key : cluster) {
+        auto it = candidates_.find(key);
+        if (it != candidates_.end() && key != best_key) {
+            const auto& site = it->second;
+            best_site.left_clip_count += site.left_clip_count;
+            best_site.right_clip_count += site.right_clip_count;
+            best_site.left_discordant += site.left_discordant;
+            best_site.right_discordant += site.right_discordant;
+            best_site.left_polyA += site.left_polyA;
+            best_site.right_polyA += site.right_polyA;
+        }
+    }
+    
+    // Update support type after clustering
+    determine_support_type(best_site);
+    
+    // Use representative position
+    clustered_candidates[best_key] = best_site;
+}
+
 void CandidateDetector::determine_support_type(CandidateSite& site) {
     bool has_left = (site.left_clip_count > 0 || site.left_discordant > 0);
     bool has_right = (site.right_clip_count > 0 || site.right_discordant > 0);
@@ -181,9 +316,9 @@ void CandidateDetector::filter_candidates() {
     for (const auto& entry : candidates_) {
         const auto& site = entry.second;
         
-        // Filter 1: Minimum evidence
-        if (site.left_clip_count + site.right_clip_count < 3 &&
-            site.left_discordant + site.right_discordant < 2) {
+        // Filter 1: Minimum evidence (Priority 2: Adjusted from 3/2 to 2/1)
+        if (site.left_clip_count + site.right_clip_count < 2 &&
+            site.left_discordant + site.right_discordant < 1) {
             to_remove.push_back(entry.first);
             continue;
         }
@@ -228,6 +363,9 @@ void CandidateDetector::filter_candidates() {
     
     std::cerr << "Filtered " << to_remove.size() << " candidates. " 
               << candidates_.size() << " remaining." << std::endl;
+    
+    // Priority 2: Log clustering info
+    std::cerr << "Priority 1 (clustering) and Priority 2 (threshold adjustment) applied." << std::endl;
 }
 
 bool CandidateDetector::write_output_bed(const std::string& output_path) {

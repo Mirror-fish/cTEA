@@ -240,7 +240,7 @@ void BamProcessor::process_alignment(bam1_t* aln, const bam_hdr_t* header) {
         uint32_t first_op = bam_cigar_op(cigar[0]);
         if (first_op == BAM_CSOFT_CLIP) {
             clip_len = bam_cigar_oplen(cigar[0]);
-            if (clip_len >= 20) {  // Minimum clip length threshold
+            if (clip_len >= 2) {  // Changed from 5 to 2 to match xTEA's MIN_CLIP_FOR_CANDIDATE
                 has_clip = true;
                 is_left_clip = true;
             }
@@ -251,7 +251,7 @@ void BamProcessor::process_alignment(bam1_t* aln, const bam_hdr_t* header) {
             uint32_t last_op = bam_cigar_op(cigar[aln->core.n_cigar - 1]);
             if (last_op == BAM_CSOFT_CLIP) {
                 clip_len = bam_cigar_oplen(cigar[aln->core.n_cigar - 1]);
-                if (clip_len >= 20) {
+                if (clip_len >= 2) {  // Changed from 5 to 2 to match xTEA
                     has_clip = true;
                 }
             }

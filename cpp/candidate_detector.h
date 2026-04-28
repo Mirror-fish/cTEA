@@ -108,6 +108,15 @@ private:
     
     void determine_support_type(CandidateSite& site);
     
+    // NEW: Cluster nearby candidates (Priority 1 improvement)
+    // Reference: xTEA's chain_regions function (PEAK_WINDOW=100bp)
+    void cluster_nearby_candidates();
+
+    // Helper function to process a cluster of nearby candidates
+    void process_cluster(
+        const std::vector<std::string>& cluster,
+        std::unordered_map<std::string, CandidateSite>& clustered_candidates);
+    
     void filter_candidates();
     
     bool write_output_bed(const std::string& output_path);
